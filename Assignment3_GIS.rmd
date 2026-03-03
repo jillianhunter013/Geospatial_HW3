@@ -47,116 +47,74 @@ This Question shows climate change in the USA by average SPEI index across regio
 
 ```{r pressure, echo=FALSE}
 # Load file in
+usstates <- spData::us_states
 spei <- rast("dataQ1/spei01.nc")
 
-# Assign monthly time index (typically 1901-present)
-time(spei) <- seq.Date(from = as.Date("1901-01-01"), by = "month", length.out = nlyr(spei))
+# Aggregate based on the region column
+usstates_aggr <- usstates %>%
+  group_by(REGION) %>%
+  summarise(geometry = st_union(geometry)) %>% 
+  st_transform(crs = st_crs(spei))
 
-# Speed up -> crop to US bounding box
-spei_us <- crop(spei, ext(-125, -66, 24, 50))
+test <- spei[[10]]
+spat.crop <- crop(test, usstates_aggr)
 
-# Filter from the last 50 years
-spei_us <- spei_us[[ time(spei_us) >= as.Date("1975-01-01") & time(spei_us) <= as.Date("2025-12-01") ]]
+# Though the plot in the assignment covers from 1965-2015, we generate a date vector for the past 50 years (using lubridate)
+date_vector <- seq(from = as.Date("1974-01-16"), to = as.Date("2024-01-16"), by = "month")
+# Numeric vector going from 781 to 1380
+t <- time(spei)                 # time for every layer
+idx_range <- 877:1477
 
-# Rename layers to dates so pivoting is robust
-names(spei_us) <- format(time(spei_us), "%Y-%m-%d")
-```
-
-```{r}
-# Load in shp file
-states <- st_read("dataQ1/cb_2018_us_state_20m.shp", quiet = TRUE) |>
-  filter(!STUSPS %in% c("AK", "HI", "PR")) |>
-  st_transform(crs(spei_us))
-```
-
-
-```{r}
-region_map <- c(
-  # Northeast
-  CT="Northeast", ME="Northeast", MA="Northeast", NH="Northeast", RI="Northeast", VT="Northeast",
-  NJ="Northeast", NY="Northeast", PA="Northeast",
-  # Midwest
-  IL="Midwest", IN="Midwest", MI="Midwest", OH="Midwest", WI="Midwest",
-  IA="Midwest", KS="Midwest", MN="Midwest", MO="Midwest", NE="Midwest", ND="Midwest", SD="Midwest",
-  # South
-  DE="South", FL="South", GA="South", MD="South", NC="South", SC="South", VA="South", WV="South", DC="South",
-  AL="South", KY="South", MS="South", TN="South",
-  AR="South", LA="South", OK="South", TX="South",
-  # West (continental)
-  AZ="West", CO="West", ID="West", MT="West", NV="West", NM="West", UT="West", WY="West",
-  CA="West", OR="West", WA="West"
+numeric_vector <- tibble::tibble(
+  spei_id = idx_range,
+  Date = as.Date(t[idx_range])
 )
 
-# set variable
-states$region <- unname(region_map[states$STUSPS])
 
-regions <- states |>
-  filter(!is.na(region)) |>
-  group_by(region) |>
-  summarise(geometry = st_union(geometry), .groups = "drop")
+```
 
-regions_v <- vect(regions)
+```{r}
+df <- result_test %>%
+  select(877:1477)
+
+df <- cbind(st_drop_geometry(usstates_aggr), df)
+
+
+# excluding REGION, change all columns to long format
+df_long <- df %>%
+  pivot_longer(cols = -REGION, names_to = "spei_id", values_to = "value")
+
+df_long <- df_long %>% 
+  # using substr, remove first 10 characters from the "spei_id" column 
+  mutate(spei_id = substr(spei_id, 11, nchar(spei_id))) %>% mutate(spei_id = as.numeric(spei_id))
+  
+# Join df_long with the numeric_vector (by "spei_id")
+df_long <- df_long %>% 
+  left_join(numeric_vector, by = "spei_id")
+
+df_long <- df_long %>% 
+  select(-spei_id) %>% 
+  mutate(Date = ymd(Date))
+
+# Group by year and summarize the mean value for each year and region
+df_long_yearly <- df_long %>% 
+  group_by(REGION, year = year(Date)) %>% 
+  summarize(mean_value = mean(value, na.rm = TRUE)) %>% 
+  ungroup()
+
 ```
 
 
 ```{r}
-# Weighted(area) mean by region
-reg_ex <- terra::extract(spei_us, regions_v, fun = mean, weights = TRUE, na.rm = TRUE)
-
-# Build panel -> region x date x SPEI
-panel <- reg_ex |>
-  as.data.frame() |>
-  mutate(region = regions$region[ID]) |>
-  pivot_longer(
-    cols = -c(ID, region),
-    names_to = "date",
-    values_to = "spei"
-  ) |>
-  mutate(date = as.Date(date)) |>
-  select(region, date, spei) |>
-  arrange(region, date)
-
-# Yearly SPEI for each region
-panel_year <- panel |>
-  mutate(year = year(date)) |>
-  group_by(region, year) |>
-  summarise(spei = mean(spei, na.rm = TRUE), .groups = "drop")
-```
-
-```{r}
-avg_year <- panel_year |>
-  group_by(year) |>
-  summarise(us_mean = mean(spei, na.rm = TRUE), .groups = "drop")
-```
-
-```{r}
-ggplot() +
-
-  # Regional yearly lines (without smooth or CI)
-  geom_line(
-    data = panel_year,
-    aes(x = year, y = spei, color = region, group = region),
-    alpha = 0.6,
-    linewidth = 0.8
-  ) +
-
-
-  # US average smooth with confidence interval ribbon 
-  geom_smooth(
-    data = avg_year,
-    aes(x = year, y = us_mean),
-    method = "loess",        
-    se = TRUE,
-    color = "royalblue1",
-    fill = "black",
-    alpha = 0.15,
-    linewidth = 1.3
-  ) +
-
+# Plot value over year for each REGION using ggplot2
+ggplot(df_long_yearly, aes(x = year, y = mean_value, color = REGION)) +
+  geom_line(linewidth = 0.7) + 
+  geom_smooth(aes(group = 1), method = "loess", se = TRUE,
+              color = "royalblue3", linewidth = 1) +
   labs(
     x = "year",
     y = "spei",
-    color = "REGION",
+    color = "REGION"
   ) +
   theme_minimal()
 ```
